@@ -1,0 +1,15 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+# Hyperparameters
+GAMMA = 0.9
+TAU = 0.005
+LR_ACTOR = 0.0001
+LR_CRITIC = 0.001
+MEMORY_SIZE = 100000
+BATCH_SIZE = 64*4
+UPDATE_EVERY = 4
+NUM_EPISODES = 2000
+RENDER_EVERY = 50
+action_size=7
+NUM_RUNS=5
