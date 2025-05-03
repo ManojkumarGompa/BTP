@@ -10,6 +10,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from convol.convolution import Convolution
 import random
 import ale_py
+env = gym.make("ALE/Assault-v5", render_mode='rgb_array')
 
 gym.register_envs(ale_py)
 
@@ -74,11 +75,16 @@ class Actor(nn.Module):
 
         return action
 
+    # def flatten_parameters(self):
+    #     params = []
+    #     for param in self.parameters():
+    #         params.append(param)
+    #     return params
     def flatten_parameters(self):
-        params = []
-        for param in self.parameters():
-            params.append(param)
-        return params
+        """
+        Flatten all parameters into a single vector.
+        """
+        return torch.cat([param.view(-1) for param in self.parameters()])
 
     def smoothened_gradient_update(self, states, actions, critic, beta, num_perturbations=5, advantages=None):
         """
@@ -96,7 +102,9 @@ class Actor(nn.Module):
             Smoothened gradient estimates
         """
         # Initialize smoothened gradient accumulator
-        smoothened_gradient = [torch.zeros_like(param) for param in self.flatten_parameters()]
+        flattened_params=self.flatten_parameters()
+        smoothened_gradient = torch.zeros_like(flattened_params)
+        
         
         # Perturbation scale (smaller c gives finer estimation but may be numerically unstable)
         c = 0.01
@@ -121,61 +129,154 @@ class Actor(nn.Module):
         original_loss.backward(retain_graph=True)
 
         # Store original gradients
-        original_gradients = [param.grad.clone() for param in self.flatten_parameters()]
+        # original_gradients = [param.grad.clone() for param in self.flatten_parameters()]
+         # Flatten original gradients
+        original_gradients = torch.cat([param.grad.view(-1) for param in self.parameters()])
+
+          # Sample a random Bernoulli perturbation vector δ_k = ±1
+        # Generate a Bernoulli distribution with p=0.5 for each parameter's shape
+         # If the result is 1 (heads), it's +1, if it's 0 (tails), it's -1
+        delta_k = 2 * torch.bernoulli(torch.full(flattened_params.shape, 0.5)).float() - 1
+
+        # delta_k = [torch.randint(0, 2, param.shape).float() * 2 - 1 for param in self.flatten_parameters()]  # +1 or -1
+
+        # Perturb the parameters θ1 = θ + c * δ_k, θ2 = θ - c * δ_k
+        theta1 = [param + c * delta_k_i for param, delta_k_i in zip(self.flatten_parameters(), delta_k)]
+        theta2 = [param - c * delta_k_i for param, delta_k_i in zip(self.flatten_parameters(), delta_k)]
+
+        # Ensure that these new tensors have requires_grad set to True
+        theta1 = [param.clone().detach().requires_grad_(True) for param in theta1]
+        theta2 = [param.clone().detach().requires_grad_(True) for param in theta2]
+
+        # Compute gradients using rollouts for θ1 and θ2
+        grad_theta1 = self.compute_gradients(critic, theta1)
+        grad_theta2 = self.compute_gradients(critic, theta2)
+
+        # Compute the difference in gradients: δG_k = ∇θ1 L(θ1) - ∇θ2 L(θ2)
+        delta_G_k = grad_theta1 - grad_theta2
+        # Perform perturbations to accumulate the smoothened gradient
+        for _ in range(num_perturbations):
+
+                rho_k = torch.randn_like(flattened_params)  # Gaussian perturbation
+
+                # First order: β * ρ_k^T ∇θ J(θ)
+                rho_dot_grad = torch.dot(rho_k.view(-1),original_gradients)
+
+                # Compute second-order terms
+                
+
+              
+                delta_k_dot_rho = torch.dot(delta_k, rho_k)  # (ρᵢᵀΔₖ)
+                delta_g_dot_rho = torch.dot(delta_G_k, rho_k)  # (ρᵢᵀδGₖ)
+                rho_dot_delta_g = torch.dot(rho_k, delta_G_k)  # (ρᵢᵀδGₖ) same as above
+                delta_k_transpose_rho = torch.dot(delta_k, rho_k)  # (Δₖᵀρᵢ)
+
+                # Second order: β^2 / 2 [(ρᵢᵀΔₖ)(δGₖᵀρᵢ) + (ρᵢᵀδGₖ)(Δₖᵀρᵢ)]
+                second_order_term = 0.5 * beta ** 2 * (
+                    delta_k_dot_rho * delta_g_dot_rho + rho_dot_delta_g * delta_k_transpose_rho
+                )
+    
+
+                # Update the smoothened gradient
+                smoothened_gradient+= rho_k * (original_loss + beta * rho_dot_grad + second_order_term)
+
+        # Normalize the smoothened gradient by the number of perturbations and beta
+        smoothened_gradient = [sg / (num_perturbations * beta) for sg in smoothened_gradient]
+        return smoothened_gradient,original_gradients,original_loss
+    
+    def compute_gradients(self, critic, theta):
+        """
+        Compute gradients for a given set of parameters θ using rollouts.
+        """
+        original_params = [param.clone() for param in self.flatten_parameters()]  # Save original parameters
+        # original_grads = [param.grad.clone() if param.grad is not None else None for param in self.flatten_parameters()]  # Save original gradients
+
+
         
-        # Zero out gradients to prepare for gradient estimation
-        for param in self.parameters():
+        for param, theta_param in zip(self.parameters(), theta):
+            param.data.copy_(theta_param)
+
+        # Zero out previous gradients (this is important for a clean backward pass)
+        for param in self.flatten_parameters():
             if param.grad is not None:
                 param.grad.zero_()
+
+        # Run rollouts and get log-probabilities and cumulative rewards
+        log_probs, cumulative_rewards = self.compute_rollout()
         
-        # Estimate second-order effects with perturbations
-        for i in range(num_perturbations):
-            # Generate perturbation directions (Rademacher distribution: ±1 with equal probability)
-            delta_k = [2 * torch.bernoulli(torch.full(param.shape, 0.5)).float() - 1 for param in self.flatten_parameters()]
-            
-            # Create perturbed parameter sets (positive and negative perturbations)
-            theta1 = [param + c * delta_k_i for param, delta_k_i in zip(self.flatten_parameters(), delta_k)]
-            theta2 = [param - c * delta_k_i for param, delta_k_i in zip(self.flatten_parameters(), delta_k)]
-
-            # Ensure parameters require gradients
-            theta1 = [param.clone().detach().requires_grad_(True) for param in theta1]
-            theta2 = [param.clone().detach().requires_grad_(True) for param in theta2]
-
-            # Compute gradients at perturbed points (using on-policy objective)
-            grad_theta1 = self.compute_on_policy_gradients(states, actions, advantages, critic, theta1)
-            grad_theta2 = self.compute_on_policy_gradients(states, actions, advantages, critic, theta2)
-
-            # Calculate the directional derivative
-            delta_G_k = [g1 - g2 for g1, g2 in zip(grad_theta1, grad_theta2)]
-            
-            # Generate random direction for Gaussian smoothing
-            rho_k = [torch.randn_like(param) for param in self.flatten_parameters()]
-            
-            # For numerical stability, normalize rho_k
-            rho_norm = torch.sqrt(sum(torch.sum(r**2) for r in rho_k))
-            rho_k = [r / rho_norm for r in rho_k]
-            
-            # Compute dot products for the smoothing
-            grad_dot_rho = sum(torch.sum(g * r) for g, r in zip(original_gradients, rho_k))
-            
-            # Compute second-order term components
-            second_order_terms = []
-            for j in range(len(delta_k)):
-                delta_k_dot_rho = torch.sum(delta_k[j] * rho_k[j])
-                delta_g_dot_rho = torch.sum(delta_G_k[j] * rho_k[j])
-                
-                second_order_term = 0.5 * beta ** 2 * (delta_k_dot_rho * delta_g_dot_rho)
-                second_order_terms.append(second_order_term)
-            
-            # Update the smoothened gradient with this perturbation's contribution
-            for j, r in enumerate(rho_k):
-                smoothened_gradient[j] += r * (original_loss + beta * grad_dot_rho + second_order_terms[j])
+        # Calculate loss using cumulative rewards and log-probabilities of initial actions
+        loss = -torch.mean(cumulative_rewards * log_probs)
+        # print("loss is ", loss, loss.shape)
         
-        # Scale the smoothened gradient by the number of perturbations and beta
-        smoothened_gradient = [sg / (num_perturbations * beta) for sg in smoothened_gradient]
-        
-        return smoothened_gradient
+        # Perform backward pass to compute gradients
+        loss.backward()
 
+        # Store gradients after backward pass
+        # Flatten gradients into a single vector
+        gradients = torch.cat([param.grad.view(-1) for param in self.parameters()])
+
+        # print(gradients)
+        # Restore original parameters and gradients
+        for param, original_param in zip(self.flatten_parameters(), original_params):
+            param.data.copy_(original_param)  # Restore original 
+
+        return gradients
+
+
+ 
+    def compute_rollout(self):
+        """
+        Run rollouts in the `assault-v4` environment and compute log-probabilities and discounted cumulative rewards.
+        Only considers the log-probability of the action taken at the start of the episode.
+        
+        Parameters:
+        - gamma (float): Discount factor for rewards (default: 0.99)
+        """
+        env_temp = gym.make('ALE/Assault-v5', render_mode='rgb_array')
+        log_probs = []
+        cumulative_rewards = []
+        states=[]
+        actions=[]
+
+        for _ in range(3):  # Run 3 episodes
+            state, _ = env_temp.reset()
+            
+
+            rewards = []
+            done = False
+
+            while not done:
+                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+                action_probs = self(state_tensor)
+                action = self.sample_action(action_probs[0])  # Sample action
+                next_state, reward, done, truncated, _ = env_temp.step(action)
+                states.append(state)
+                actions.append(action)
+
+                state= next_state  # Update state
+                rewards.append(reward)  # Collect all rewards in the episode
+
+            # Calculate discounted cumulative rewards
+            discounted_reward = 0
+            discounted_rewards = []
+            for r in reversed(rewards):
+                discounted_reward = r + GAMMA * discounted_reward  # Apply discount factor
+                discounted_rewards.insert(0, discounted_reward)  # Insert at the beginning
+
+            cumulative_rewards.append(discounted_rewards[0])  # Store total discounted reward for the episode
+
+        env_temp.close()
+        states_tensor=torch.FloatTensor(np.stack(states))
+        actions_tensor=torch.LongTensor(actions).unsqueeze(1)
+        action_probs = self(states_tensor)
+        action_indices = actions_tensor
+        log_probs = torch.log(torch.gather(action_probs, dim=1, index=action_indices))
+
+        # Convert to tensors with consistent shapes
+       
+        cumulative_rewards = torch.tensor(cumulative_rewards, dtype=torch.float32)  # Shape: (5,)
+
+        return log_probs, cumulative_rewards
     def compute_on_policy_gradients(self, states, actions, advantages, critic, theta=None):
         """
         Compute policy gradients for on-policy learning
@@ -233,67 +334,3 @@ class Actor(nn.Module):
                     param.grad = original_grad
         
         return gradients
-
-    def compute_rollout(self, env=None, max_steps=1000):
-        """
-        Run a single rollout for the current policy
-        
-        Args:
-            env: Environment to use (creates a new one if None)
-            max_steps: Maximum number of steps per episode
-            
-        Returns:
-            states, actions, rewards, log_probs, dones, episode_reward
-        """
-        if env is None:
-            env_temp = gym.make('ALE/Assault-v5', render_mode='rgb_array')
-        else:
-            env_temp = env
-            
-        states = []
-        actions = []
-        rewards = []
-        log_probs = []
-        dones = []
-        
-        state, _ = env_temp.reset()
-        done = False
-        episode_reward = 0
-        
-        for step in range(max_steps):
-            states.append(state)
-            
-            # Convert state to tensor
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-            
-            # Get action probabilities
-            action_probs = self(state_tensor)
-            
-            # Sample action
-            action = self.sample_action(action_probs[0])
-            actions.append(action)
-            
-            # Get log probability
-            action_idx = torch.tensor([[action]]).to(device)
-            log_prob = torch.log(torch.gather(action_probs, 1, action_idx)).item()
-            log_probs.append(log_prob)
-            
-            # Take action in environment
-            next_state, reward, done, truncated, _ = env_temp.step(action)
-            
-            # Store transition
-            rewards.append(reward)
-            dones.append(done or truncated)
-            
-            # Update state and reward
-            state = next_state
-            episode_reward += reward
-            
-            if done or truncated:
-                break
-                
-        # Close environment if we created it
-        if env is None:
-            env_temp.close()
-            
-        return states, actions, rewards, log_probs, dones, episode_reward

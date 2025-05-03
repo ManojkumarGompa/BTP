@@ -4,9 +4,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from utils import config as cfg
 from collections import deque
 import math
+from utils import config as cfg
+
 
 # Configuration parameters
 GAMMA = cfg.GAMMA
@@ -16,18 +17,21 @@ LR_CRITIC = cfg.LR_CRITIC
 action_size = cfg.action_size
 
 # SFAC-specific parameters
-T_MIN = 50        # Minimum number of perturbations
-T_MAX = 1000     # Maximum number of perturbations
-T_INIT = 100     # Initial number of perturbations
-BETA_MIN = 0.01  # Minimum smoothing parameter
-BETA_MAX = 5.0   # Maximum smoothing parameter
-BETA_INIT = 1.0  # Initial smoothing parameter
-ETA = 0.1        # Learning rate for T adjustment
-LAMBDA = 0.5     # Learning rate for beta adjustment
-KAPPA = 0.005    # Target critic update rate
-TARGET_VARIANCE = 0.1  # Target gradient variance
-REWARD_BUFFER_SIZE = 20  # Size of reward buffer for reward improvement calculation
-NUM_TRAJECTORIES = 5     # Number of trajectories to collect before each update
+T_MIN = cfg.T_MIN        # Minimum number of perturbations
+T_MAX = cfg.T_MAX        # Maximum number of perturbations
+T_INIT = cfg.T_INIT      # Initial number of perturbations
+BETA_MIN = cfg.BETA_MIN  # Minimum smoothing parameter
+BETA_MAX = cfg.BETA_MAX  # Maximum smoothing parameter
+BETA_INIT = cfg.BETA_INIT  # Initial smoothing parameter
+ETA = cfg.ETA            # Learning rate for T adjustment
+LAMBDA = cfg.LAMBDA      # Learning rate for beta adjustment
+KAPPA = cfg.KAPPA        # Target critic update rate
+TARGET_VARIANCE = cfg.TARGET_VARIANCE  # Target gradient variance
+REWARD_BUFFER_SIZE = cfg.REWARD_BUFFER_SIZE  # Size of reward buffer for reward improvement calculation
+NUM_TRAJECTORIES = cfg.NUM_TRAJECTORIES     # Number of trajectories to collect before each update
+
+delta_T_up = cfg.DELTA_T_UP  # Increment step for T
+delta_T_down = cfg.DELTA_T_DOWN  # Decrement step for T
 
 
 class MultiTrajectorySFACAgent:
@@ -95,36 +99,84 @@ class MultiTrajectorySFACAgent:
     def store_episode_reward(self, episode_reward):
         """Store episode reward in the reward buffer for beta adjustment"""
         self.reward_buffer.append(episode_reward)
-    
-    def calculate_analytical_gradient_variance(self, gradient):
+    def calculate_analytical_gradient_variance(self, J_theta, gradient, sfac_gradient):
         """
-        Calculate gradient variance analytically using Taylor expansion
+        Calculate gradient variance analytically using the corrected formula:
         
-        σ_g^2 ≈ β^2 · Tr(∇J(θ)∇J(θ)^T) = β^2 · ||∇J(θ)||_2^2
+        σ_g^2 = (1 / (T - 1)) * Σ_{i=1}^T ∥βρ_i (J(θ) + (βρ_i / T) ∇θJ(θ)) - ∇θSFACJ(θ)∥^2
         """
-        # Flatten and concatenate all gradients
-        flat_gradient = torch.cat([g.view(-1) for g in gradient])
+        T = self.T
+        beta = self.beta
+        # Print the shapes of sfac_gradient and gradient
+
+
+        # Initialize variance accumulator
+        variance_accumulator = 0.0
+
+        for i in range(T):
+            # Sample perturbation ρ_i (Gaussian noise)
+            print(f"i: {i}, T: {T}")
+            rho = [torch.randn_like(param) for param in self.actor.parameters()]
+
+            # Compute the variance term for this perturbation
+            gradient_difference = [
+                beta * r * (J_theta + (beta / T) * g.item()) - sfac_g.item()
+                for r, g, sfac_g in zip(rho, gradient, sfac_gradient)
+            ]
+            gradient_difference_norm = sum(
+                torch.sum(diff ** 2) for diff in gradient_difference
+            )
+            variance_accumulator += gradient_difference_norm
+
+        # Final variance calculation
+        gradient_variance = variance_accumulator / (T - 1)
+        return gradient_variance
+    # def calculate_analytical_gradient_variance(self, gradient):
+    #     """
+    #     Calculate gradient variance analytically using Taylor expansion
         
-        # Calculate L2 norm squared
-        gradient_norm_squared = torch.sum(flat_gradient ** 2).item()
+    #     σ_g^2 ≈ β^2 · Tr(∇J(θ)∇J(θ)^T) = β^2 · ||∇J(θ)||_2^2
+    #     """
+    #     # Flatten and concatenate all gradients
+    #     flat_gradient = torch.cat([g.view(-1) for g in gradient])
         
-        # Analytical variance
-        variance = self.beta ** 2 * gradient_norm_squared
+    #     # Calculate L2 norm squared
+    #     gradient_norm_squared = torch.sum(flat_gradient ** 2).item()
         
-        return variance
+    #     # Analytical variance
+    #     variance = self.beta ** 2 * gradient_norm_squared
+        
+    #     return variance
     
+    # def adjust_T(self, gradient_variance):
+    #     """
+    #     Adjust number of perturbations based on gradient variance
+        
+    #     T ← clip(T · exp(η · (σ_g^2 - τ_target)), T_min, T_max)
+    #     """
+    #     # Adjust T exponentially based on difference from target variance
+    #     adjustment = math.exp(ETA * (gradient_variance - TARGET_VARIANCE))
+    #     new_T = int(self.T * adjustment)
+        
+    #     # Clip T to valid range
+    #     self.T = max(T_MIN, min(T_MAX, new_T))
+        
+    #     print(f"Adjusted T to {self.T} based on variance: {gradient_variance:.4f}")
     def adjust_T(self, gradient_variance):
         """
-        Adjust number of perturbations based on gradient variance
-        
-        T ← clip(T · exp(η · (σ_g^2 - τ_target)), T_min, T_max)
+        Adjust number of perturbations based on gradient variance.
+
+        If σ_g^2 > TARGET_VARIANCE (too noisy):
+            T ← min(T + ΔT_up, T_max)
+        If σ_g^2 < TARGET_VARIANCE (too stable):
+            T ← max(T - ΔT_down, T_min)
         """
-        # Adjust T exponentially based on difference from target variance
-        adjustment = math.exp(ETA * (gradient_variance - TARGET_VARIANCE))
-        new_T = int(self.T * adjustment)
-        
-        # Clip T to valid range
-        self.T = max(T_MIN, min(T_MAX, new_T))
+        if gradient_variance > TARGET_VARIANCE:
+            # Too noisy, increase T
+            self.T = min(self.T + delta_T_up, T_MAX)
+        elif gradient_variance < TARGET_VARIANCE:
+            # Too stable, decrease T
+            self.T = max(self.T - delta_T_down, T_MIN)
         
         print(f"Adjusted T to {self.T} based on variance: {gradient_variance:.4f}")
     
@@ -184,11 +236,12 @@ class MultiTrajectorySFACAgent:
         actions_one_hot = torch.zeros(len(self.actions), action_size).scatter(1, actions, 1)
 
         # ----- Update Critic -----
+        print("updating the critic")
         with torch.no_grad():
             # Get next actions from current policy (on-policy)
-            next_actions_probs = self.actor(next_states)
+            target_next_actions = self.target_actor(next_states)
             # Get target Q values using target critic
-            target_q_values = rewards + (1 - dones) * GAMMA * self.target_critic(next_states, next_actions_probs)
+            target_q_values = rewards + (1 - dones) * GAMMA * self.target_critic(next_states, target_next_actions)
 
         # Get current Q values
         current_q_values = self.critic(states, actions_one_hot)
@@ -201,86 +254,33 @@ class MultiTrajectorySFACAgent:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # ----- Update Actor using Smoothed Gradient with Taylor Expansion -----
-        # 1. Get baseline performance and gradient
-        self.actor_optimizer.zero_grad()
-        action_probs = self.actor(states)
+        # # ----- Update Actor using Smoothed Gradient with Taylor Expansion -----
+        # # 1. Get baseline performance and gradient
+        # self.actor_optimizer.zero_grad()
+        # action_probs = self.actor(states)
         
-        # Original value (negative for gradient ascent)
-        J_theta = -torch.mean(self.critic(states, action_probs))
-        J_theta.backward(retain_graph=True)
+        # # Original value (negative for gradient ascent)
+        # J_theta = -torch.mean(self.critic(states, action_probs))
+        # J_theta.backward(retain_graph=True)
         
-        # Store original gradient
-        original_gradient = [param.grad.clone() for param in self.actor.parameters()]
+        # # Store original gradient
+        # original_gradient = [param.grad.clone() for param in self.actor.parameters()]
+
         
         # Calculate analytical gradient variance
-        gradient_variance = self.calculate_analytical_gradient_variance(original_gradient)
+        print("updating the actor")
+        self.actor_optimizer.zero_grad()
+        smoothened_gradient,original_gradient,original_loss=self.actor.smoothened_gradient_update(states,actions,self.critic,self.beta,self.T)
+        gradient_variance = self.calculate_analytical_gradient_variance(-1*original_loss, original_gradient,smoothened_gradient)
+        print(f"Gradient variance: {gradient_variance:.4f}")
         
         # Adjust number of perturbations
         self.adjust_T(gradient_variance)
         
-        # 2. Sample perturbations and calculate smoothed gradient
-        smoothed_gradient = [torch.zeros_like(param) for param in self.actor.parameters()]
-        
-        for i in range(self.T):
-            # Sample Gaussian perturbation
-            rho_i = [torch.randn_like(param) for param in self.actor.parameters()]
-            
-            # Normalize the perturbation
-            rho_norm = torch.sqrt(sum(torch.sum(r**2) for r in rho_i))
-            rho_i = [r / rho_norm for r in rho_i]
-            
-            # Perturb parameters
-            perturbed_params = []
-            for param, rho in zip(self.actor.parameters(), rho_i):
-                perturbed_params.append(param + self.beta * rho)
-            
-            # Compute gradient at perturbed point
-            self.actor_optimizer.zero_grad()
-            
-            # Save original parameters
-            original_params = [p.clone() for p in self.actor.parameters()]
-            
-            # Set perturbed parameters
-            for param, perturbed_param in zip(self.actor.parameters(), perturbed_params):
-                param.data.copy_(perturbed_param)
-            
-            # Get performance at perturbed point
-            perturbed_action_probs = self.actor(states)
-            J_theta_i = -torch.mean(self.critic(states, perturbed_action_probs))
-            J_theta_i.backward(retain_graph=True)
-            
-            # Get gradient at perturbed point
-            perturbed_gradient = [param.grad.clone() for param in self.actor.parameters()]
-            
-            # Calculate gradient difference for Hessian approximation
-            delta_g_i = [pg - og for pg, og in zip(perturbed_gradient, original_gradient)]
-            
-            # Restore original parameters
-            for param, orig_param in zip(self.actor.parameters(), original_params):
-                param.data.copy_(orig_param)
-            
-            # Calculate linear term: ρ_i^T ∇J(θ)
-            linear_term = sum(torch.sum(r * g) for r, g in zip(rho_i, original_gradient))
-            
-            # Calculate second-order term: ρ_i^T H ρ_i ≈ ρ_i^T (δg_i) / β
-            second_order_term = sum(torch.sum(r * dg) / self.beta for r, dg in zip(rho_i, delta_g_i))
-            
-            # Taylor expansion approximation
-            taylor_approx = J_theta + self.beta * linear_term + 0.5 * self.beta**2 * second_order_term
-            
-            # Contribute to smoothed gradient
-            for j, (r, dg) in enumerate(zip(rho_i, delta_g_i)):
-                # Combine contribution from zeroth, first, and second order terms
-                smoothed_gradient[j] += r * (taylor_approx + self.beta * linear_term + 
-                                            0.5 * self.beta**2 * torch.sum(r * dg))
-            
-        # Scale the smoothed gradient
-        smoothed_gradient = [sg / (self.T * self.beta) for sg in smoothed_gradient]
-        
+     
         # Apply smoothed gradient
         self.actor_optimizer.zero_grad()
-        for param, smoothed_grad in zip(self.actor.parameters(), smoothed_gradient):
+        for param, smoothed_grad in zip(self.actor.flatten_parameters(), smoothened_gradient):
             param.grad = smoothed_grad
         
         # Update actor
@@ -298,5 +298,6 @@ class MultiTrajectorySFACAgent:
         
         # Clear trajectory buffer after update
         # self.reset_buffers()
+        print("updated the agent(actor and critic)")
         
         return critic_loss.item()

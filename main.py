@@ -10,6 +10,13 @@ from agents.sfac_agent import MultiTrajectorySFACAgent
 from agents.policy_gradient_agent import PolicyGradientAgent
 from utils import config as cfg
 
+NUM_EPISODES = cfg.NUM_EPISODES
+NUM_TRAJECTORIES = cfg.NUM_TRAJECTORIES
+MAX_STEPS = cfg.MAX_STEPS
+SAVE_INTERVAL = cfg.SAVE_INTERVAL
+LOG_INTERVAL = cfg.LOG_INTERVAL
+ENV_NAME='ALE/Assault-v5'
+
 # Check for GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -20,9 +27,9 @@ gym.register_envs(ale_py)
 def parse_args():
     parser = argparse.ArgumentParser(description='Train and compare SFAC with Regular Policy Gradient')
     parser.add_argument('--env', type=str, default='ALE/Assault-v5', help='Atari environment name')
-    parser.add_argument('--episodes', type=int, default=500, help='Number of episodes to train')
-    parser.add_argument('--perturbations', type=int, default=500, help='Initial number of perturbations for SFAC')
-    parser.add_argument('--trajectories', type=int, default=5, help='Number of trajectories per update')
+    # parser.add_argument('--episodes', type=int, default=500, help='Number of episodes to train')
+    # parser.add_argument('--perturbations', type=int, default=100, help='Initial number of perturbations for SFAC')
+    # parser.add_argument('--trajectories', type=int, default=5, help='Number of trajectories per update')
     parser.add_argument('--mode', choices=['sfac', 'pg', 'both'], default='both', 
                         help='Which algorithm to run: sfac, pg, or both')
     return parser.parse_args()
@@ -30,13 +37,6 @@ def parse_args():
 def run_comparison():
     # Parse command-line arguments
     args = parse_args()
-    
-    ENV_NAME = args.env
-    NUM_EPISODES = args.episodes
-    NUM_TRAJECTORIES = args.trajectories
-    MAX_STEPS = 10000
-    SAVE_INTERVAL = 50
-    LOG_INTERVAL = 10
     
     # Create directories for saving models and results
     os.makedirs('models', exist_ok=True)
@@ -68,7 +68,7 @@ def run_comparison():
     if args.mode in ['sfac', 'both']:
         print("\n=== Training SFAC Agent ===")
         sfac_agent = MultiTrajectorySFACAgent(state_dim, action_dim)
-        sfac_agent.T = args.perturbations  # Set initial perturbation count
+        sfac_agent.T = cfg.T_INIT # Set initial perturbation count
         
         sfac_rewards, sfac_avg_rewards, beta_values, perturbation_values = train_sfac(
             env, sfac_agent, NUM_EPISODES, MAX_STEPS, NUM_TRAJECTORIES, SAVE_INTERVAL, LOG_INTERVAL
@@ -89,7 +89,7 @@ def run_comparison():
             sfac_rewards, pg_rewards, 
             sfac_avg_rewards, pg_avg_rewards,
             beta_values, perturbation_values,
-            ENV_NAME, args.perturbations
+            ENV_NAME, cfg.T_INIT
         )
     
     env.close()
@@ -119,6 +119,7 @@ def train_sfac(env, agent, num_episodes, max_steps, num_trajectories, save_inter
         # Run a trajectory
         state, _ = env.reset()
         trajectory_reward = 0
+        print(f"SFAC trajectory : trajectory_Number = {total_trajectories}")
         
         for step in range(max_steps):
             # Convert state to tensor
@@ -142,11 +143,13 @@ def train_sfac(env, agent, num_episodes, max_steps, num_trajectories, save_inter
                 break
         
         # Store trajectory reward
+        print("finished an episode and storing trajectory reward")
         agent.store_trajectory_reward(trajectory_reward)
         total_trajectories += 1
         
         # Update policy after collecting NUM_TRAJECTORIES trajectories
         if agent.has_enough_trajectories():
+            print("updating the agent")
             agent.update()
             
             # Log progress
@@ -179,8 +182,8 @@ def train_sfac(env, agent, num_episodes, max_steps, num_trajectories, save_inter
                     'SFAC', episode
                 )
             
+        
             agent.reset_buffers()
-    
     # Save final model
     torch.save(agent.actor.state_dict(), 'models/sfac_actor_final.pth')
     torch.save(agent.critic.state_dict(), 'models/sfac_critic_final.pth')
