@@ -24,9 +24,9 @@ HIDDEN2_DIM = 256
 
 # SFAC parameters
 BETA_INIT = 0.5
-T_INIT = 500
+T_INIT = 50
 T_MIN = 20
-T_MAX = 500
+T_MAX = 50
 TARGET_VARIANCE = 0.01
 
 # Batch and buffer sizes
@@ -69,3 +69,7 @@ RENDER_EVAL = False  # Whether to render evaluation episodes
 # Checkpoint parameters
 SAVE_FREQUENCY = 500  # Episodes between checkpoints
 EARLY_STOPPING_PATIENCE = 20  # Number of evals with no improvement before stopping
+
+# Add these to config.py
+N_EPOCHS = 4  # Number of PPO-style epochs
+MINIBATCH_SIZE = 512  # Size of minibatch for updates

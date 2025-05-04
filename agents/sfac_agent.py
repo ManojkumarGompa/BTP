@@ -6,7 +6,7 @@ import math
 from collections import deque
 from utils import config as cfg
 import random
-
+from memory_profiler import profile
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Constants for T adjustment
@@ -208,11 +208,15 @@ class MultiTrajectorySFACAgent:
             self.beta = min(cfg.BETA_MAX, self.beta * cfg.BETA_INCREASE_FACTOR)
             print(f"Rewards declining, increasing beta to {self.beta:.4f}")
         # Else, keep beta the same
-        
-    def update(self, batch_size=cfg.BATCH_SIZE):
+    # @profile    
+    def update(self, batch_size=cfg.BATCH_SIZE, n_epochs=cfg.N_EPOCHS):
         """
         Update actor and critic networks using collected transitions and SFAC.
+        Uses multiple epochs like PPO for better data efficiency.
         """
+        if len(self.states) < batch_size:
+            return  # Not enough data
+            
         # Convert lists to tensors
         states = torch.FloatTensor(np.array(self.states)).to(device)
         next_states = torch.FloatTensor(np.array(self.next_states)).to(device)
@@ -220,89 +224,86 @@ class MultiTrajectorySFACAgent:
         rewards = torch.FloatTensor(np.array(self.rewards)).unsqueeze(1).to(device)
         dones = torch.FloatTensor(np.array(self.dones)).unsqueeze(1).to(device)
         
-        # Process in batches to avoid memory issues
-        n_batches = max(1, len(self.states) // batch_size)
-        indices = np.arange(len(self.states))
-        np.random.shuffle(indices)
+        # Pre-compute action probabilities and values to save computation
+        with torch.no_grad():
+            action_probs = self.actor(states)
+            next_action_probs = self.actor(next_states)
+            values = self.critic(states, action_probs)
+            next_values = self.critic(next_states, next_action_probs)
         
-        for batch_idx in range(n_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, len(self.states))
-            batch_indices = indices[start_idx:end_idx]
-            
-            # Get batch data
-            batch_states = states[batch_indices]
-            batch_next_states = next_states[batch_indices]
-            batch_actions = actions[batch_indices]
-            batch_rewards = rewards[batch_indices]
-            batch_dones = dones[batch_indices]
-            
-            # Get action probabilities for current and next states
-            action_probs = self.actor(batch_states)
-            next_action_probs = self.actor(batch_next_states).detach()
-            
-            # Convert actions to one-hot encoding for critic input
-            actions_one_hot = torch.zeros(batch_actions.size(0), self.actor.policy_mean.out_features).to(device)
-            actions_one_hot.scatter_(1, batch_actions, 1)
-            
-            # Compute values and next values
-            with torch.no_grad():
-                next_values = self.critic(batch_next_states, next_action_probs)
-            values = self.critic(batch_states, action_probs)
-            
-            # Calculate advantages using GAE - FIX: Detach tensors before numpy conversion
-            advantages, returns = self.calculate_advantages(
-                batch_rewards.cpu().detach().numpy().flatten(),
-                values.cpu().detach().numpy().flatten(),
-                next_values.cpu().detach().numpy().flatten(),
-                batch_dones.cpu().detach().numpy().flatten()
-            )
-            advantages = torch.FloatTensor(advantages).to(device)
-            returns = torch.FloatTensor(returns).to(device)
-            
-            # Update critic
-            self.critic_optimizer.zero_grad()
-            critic_value = self.critic(batch_states, action_probs)
-            critic_loss = nn.MSELoss()(critic_value, returns.unsqueeze(1))
-            critic_loss.backward()
-            # Apply gradient clipping to critic
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
-            self.critic_optimizer.step()
-            
-            # Update actor using SFAC
-            # Get smoothened gradient
-            sfac_gradient, original_gradient, original_loss = self.actor.smoothened_gradient_update(
-                batch_states, batch_actions, self.critic,
-                beta=self.beta, num_perturbations=self.T, advantages=advantages
-            )
-            
-            # Apply smoothened gradient
-            self.actor_optimizer.zero_grad()
-            
-            # Set gradients for parameters based on smoothened gradient
-            if isinstance(sfac_gradient, torch.Tensor):
-                # If sfac_gradient is a single flattened tensor
-                idx = 0
-                for param in self.actor.parameters():
-                    num_params = param.numel()
-                    param.grad = sfac_gradient[idx:idx+num_params].view(param.shape)
-                    idx += num_params
-            else:
-                # If sfac_gradient is a list of tensors
-                for param, sg in zip(self.actor.parameters(), sfac_gradient):
-                    param.grad = sg.view_as(param)
-            
-            # Apply gradient clipping to actor
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
-            self.actor_optimizer.step()
-            
-            # Calculate gradient variance for T adjustment
-            # gradient_variance = self.calculate_analytical_gradient_variance(
-            #     original_loss.item(), original_gradient, sfac_gradient
-            # )
-            
-            # Adjust T based on gradient variance
-            # self.adjust_T(gradient_variance)
+        # Calculate advantages and returns once
+        advantages, returns = self.calculate_advantages(
+            rewards.cpu().detach().numpy().flatten(),
+            values.cpu().detach().numpy().flatten(),
+            next_values.cpu().detach().numpy().flatten(),
+            dones.cpu().detach().numpy().flatten()
+        )
+        advantages = torch.FloatTensor(advantages).to(device)
+        returns = torch.FloatTensor(returns).to(device)
         
-        # Clear buffers after update
+        # Multiple epochs of training, like PPO
+        for epoch in range(n_epochs):
+            # Process in minibatches
+            # print(f"Epoch {epoch + 1}/{n_epochs}")
+            n_minibatches = max(1, len(self.states) // batch_size)
+            indices = np.arange(len(self.states))
+            np.random.shuffle(indices)
+            
+            for batch_idx in range(n_minibatches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, len(self.states))
+                batch_indices = indices[start_idx:end_idx]
+                
+                # Get batch data
+                batch_states = states[batch_indices]
+                batch_next_states = next_states[batch_indices]
+                batch_actions = actions[batch_indices]
+                batch_advantages = advantages[batch_indices]
+                batch_returns = returns[batch_indices]
+                
+                # Update critic
+                self.critic_optimizer.zero_grad()
+                # batch_action_probs = self.actor(batch_states)
+                with torch.no_grad():
+                    batch_action_probs = self.actor(batch_states).detach()  # No gradient flow
+                batch_values = self.critic(batch_states, batch_action_probs)
+                critic_loss = nn.MSELoss()(batch_values, batch_returns.unsqueeze(1))
+                critic_loss.backward()
+                # Apply gradient clipping to critic
+                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+                self.critic_optimizer.step()
+                
+                # Update actor using SFAC
+                sfac_gradient, original_gradient, original_loss = self.actor.smoothened_gradient_update(
+                    batch_states, batch_actions, self.critic,
+                    beta=self.beta, num_perturbations=self.T, advantages=batch_advantages
+                )
+                
+                # Apply smoothened gradient
+                self.actor_optimizer.zero_grad()
+                
+                # Set gradients for parameters based on smoothened gradient
+                if isinstance(sfac_gradient, torch.Tensor):
+                    idx = 0
+                    for param in self.actor.parameters():
+                        num_params = param.numel()
+                        param.grad = sfac_gradient[idx:idx+num_params].view(param.shape)
+                        idx += num_params
+                else:
+                    for param, sg in zip(self.actor.parameters(), sfac_gradient):
+                        param.grad = sg.view_as(param)
+                
+                # Apply gradient clipping to actor
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+                self.actor_optimizer.step()
+                
+                # # Calculate gradient variance and adjust T periodically
+                # if batch_idx == 0 and epoch == 0:  # Only once per update
+                #     gradient_variance = self.calculate_analytical_gradient_variance(
+                #         original_loss.item(), original_gradient, sfac_gradient
+                #     )
+                #     self.adjust_T(gradient_variance)
+            del batch_states, batch_next_states, batch_actions, batch_advantages
+        
+        # Reset buffers after multiple epochs of updates
         self.reset_buffers()

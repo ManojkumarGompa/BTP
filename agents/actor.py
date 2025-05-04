@@ -14,6 +14,7 @@ from utils.preprocessing import AtariPreprocessor
 
 env = gym.make("ALE/Assault-v5", render_mode='rgb_array')
 gym.register_envs(ale_py)
+from memory_profiler import profile
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_size, hidden1_dim=512, hidden2_dim=256):
@@ -118,7 +119,8 @@ class Actor(nn.Module):
         Flatten all parameters into a single vector.
         """
         return torch.cat([param.view(-1) for param in self.parameters()])
-        
+    
+    # @profile    
     def smoothened_gradient_update(self, states, actions, critic, beta, num_perturbations=5, advantages=None):
         """
         Enhanced smoothened gradient update with dynamic tuning support for on-policy learning.
@@ -142,7 +144,7 @@ class Actor(nn.Module):
         smoothened_gradient = torch.zeros_like(flattened_params)
         
         # Dynamic perturbation scale (smaller c for fine-grained estimation)
-        c = beta * 0.1  # Scale with beta as recommended
+        c =  0.1  # Scale with beta as recommended
         
         # Get initial action probabilities
         action_probs = self(states)
@@ -162,7 +164,7 @@ class Actor(nn.Module):
         
         # Compute policy loss with entropy bonus (negative for gradient ascent)
         original_loss = -torch.mean(advantages * log_probs) - entropy_coef * entropy
-        original_loss.backward(retain_graph=True)
+        original_loss.backward()
 
         # Flatten original gradients
         original_gradients = torch.cat([param.grad.view(-1) for param in self.parameters()])
@@ -183,6 +185,7 @@ class Actor(nn.Module):
         
         # Perturb the parameters θ1 = θ + c * δ_k
         for i, param in enumerate(self.parameters()):
+
             start_idx = 0
             if i > 0:
                 start_idx = sum(p.numel() for p in list(self.parameters())[:i])
@@ -220,11 +223,15 @@ class Actor(nn.Module):
             
         # Calculate gradient differences for second-order term
         delta_G_k = grad_theta1 - grad_theta2
-        
+        perturbation_buffer = torch.empty_like(flattened_params) 
         # Perform Gaussian perturbations to accumulate the smoothened gradient (SFAC core)
-        for _ in range(num_perturbations):
+        for i in range(num_perturbations):
+            # print("Perturbation iteration:", i)
             # Sample Gaussian perturbation as in your original code
-            rho_k = torch.randn_like(flattened_params)
+            # rho_k = torch.randn_like(flattened_params)
+
+            perturbation_buffer.normal_() 
+            rho_k = perturbation_buffer 
             
             # First order term: β * ρ_k^T ∇θ J(θ) 
             rho_dot_grad = torch.dot(rho_k, original_gradients)
@@ -349,7 +356,7 @@ class Actor(nn.Module):
                 
             # Store the cumulative (discounted) reward of the episode
             cumulative_rewards_list.append(discounted_rewards[0])
-            
+        print("closing the env")   
         env_temp.close()
         
         # Convert to tensors
@@ -359,7 +366,10 @@ class Actor(nn.Module):
         # Get log probabilities of taken actions
         action_probs = self(states_tensor)
         log_probs = torch.log(torch.gather(action_probs, dim=1, index=actions_tensor))
-        
+        del states_tensor, actions_tensor, action_probs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+                
         # Convert rewards to tensor
         cumulative_rewards = torch.tensor(cumulative_rewards_list, dtype=torch.float32).to(device)
         
