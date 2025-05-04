@@ -54,12 +54,12 @@ class Actor(nn.Module):
         
     def sample_action(self, action_probs):
         """Sample an action from the policy distribution"""
-        epsilon = 0.1  # Exploration rate
+        # epsilon = 0.1  # Exploration rate
 
-        if random.random() < epsilon:
-            # Uniformly random action from 0 to 6
-            action = torch.randint(0, 7, (1,)).item()
-            return action
+        # if random.random() < epsilon:
+        #     # Uniformly random action from 0 to 6
+        #     action = torch.randint(0, 7, (1,)).item()
+        #     return action
 
         # Ensure action_probs is valid probability distribution
         if isinstance(action_probs, torch.Tensor):
@@ -237,7 +237,7 @@ class Actor(nn.Module):
         states=[]
         actions=[]
 
-        for _ in range(3):  # Run 3 episodes
+        for _ in range(5):  # Run 5 episodes
             state, _ = env_temp.reset()
             
 

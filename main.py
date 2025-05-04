@@ -287,7 +287,7 @@ def save_intermediate_plot(rewards, avg_rewards, betas=None, perturbations=None,
     # Plot average rewards
     plt.subplot(2, 2, 2)
     plt.plot(avg_rewards)
-    plt.title(f'{algorithm} Average Rewards (last 100 episodes)')
+    plt.title(f'{algorithm} Average Rewards (last 50 episodes)')
     plt.xlabel('Episode')
     plt.ylabel('Average Reward')
     plt.grid(True, alpha=0.3)

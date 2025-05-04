@@ -10,3 +10,4 @@
 Changes made to original code till now:
 1. flatten paramters
 2. compute rollout logprobs calculation.
+3. modified epsilong greedy to categorical.
