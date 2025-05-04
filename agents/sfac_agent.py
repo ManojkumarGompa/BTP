@@ -254,34 +254,21 @@ class MultiTrajectorySFACAgent:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # # ----- Update Actor using Smoothed Gradient with Taylor Expansion -----
-        # # 1. Get baseline performance and gradient
-        # self.actor_optimizer.zero_grad()
-        # action_probs = self.actor(states)
-        
-        # # Original value (negative for gradient ascent)
-        # J_theta = -torch.mean(self.critic(states, action_probs))
-        # J_theta.backward(retain_graph=True)
-        
-        # # Store original gradient
-        # original_gradient = [param.grad.clone() for param in self.actor.parameters()]
+   
 
         
         # Calculate analytical gradient variance
         print("updating the actor")
         self.actor_optimizer.zero_grad()
         smoothened_gradient,original_gradient,original_loss=self.actor.smoothened_gradient_update(states,actions,self.critic,self.beta,self.T)
-        gradient_variance = self.calculate_analytical_gradient_variance(-1*original_loss, original_gradient,smoothened_gradient)
-        print(f"Gradient variance: {gradient_variance:.4f}")
+        # gradient_variance = self.calculate_analytical_gradient_variance(-1*original_loss, original_gradient,smoothened_gradient)
+        # print(f"Gradient variance: {gradient_variance:.4f}")
         
         # Adjust number of perturbations
-        self.adjust_T(gradient_variance)
+        # self.adjust_T(gradient_variance)
         
      
-        # Apply smoothed gradient
-        self.actor_optimizer.zero_grad()
-        for param, smoothed_grad in zip(self.actor.flatten_parameters(), smoothened_gradient):
-            param.grad = smoothed_grad
+        self.assign_flat_list_to_param_grads(smoothened_gradient)
         
         # Update actor
         self.actor_optimizer.step()
@@ -296,8 +283,22 @@ class MultiTrajectorySFACAgent:
         self.store_episode_reward(avg_trajectory_reward)
         self.adjust_beta()
         
-        # Clear trajectory buffer after update
-        # self.reset_buffers()
+      
         print("updated the agent(actor and critic)")
         
         return critic_loss.item()
+    def assign_flat_list_to_param_grads(self, flat_grad_list):
+        """
+        Assign a flat list of gradient tensors (scalars or small tensors)
+        to the .grad fields of model parameters by reshaping appropriately.
+        """
+        idx = 0
+        for param in self.actor.parameters():
+            numel = param.numel()
+            # Collect next `numel` gradient scalars
+            flat_slice = flat_grad_list[idx:idx + numel]
+            # Stack and reshape to match the parameter's shape
+            reshaped = torch.stack(flat_slice).view_as(param)
+            param.grad = reshaped.clone()
+            idx += numel
+

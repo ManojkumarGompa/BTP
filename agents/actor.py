@@ -188,8 +188,8 @@ class Actor(nn.Module):
         """
         Compute gradients for a given set of parameters θ using rollouts.
         """
-        original_params = [param.clone() for param in self.flatten_parameters()]  # Save original parameters
-        # original_grads = [param.grad.clone() if param.grad is not None else None for param in self.flatten_parameters()]  # Save original gradients
+        original_params = [param.clone() for param in self.parameters()]  # Save original parameters
+        original_grads = [param.grad.clone() if param.grad is not None else None for param in self.parameters()]  # Save original gradients
 
 
         
@@ -197,7 +197,7 @@ class Actor(nn.Module):
             param.data.copy_(theta_param)
 
         # Zero out previous gradients (this is important for a clean backward pass)
-        for param in self.flatten_parameters():
+        for param in self.parameters():
             if param.grad is not None:
                 param.grad.zero_()
 
@@ -217,13 +217,12 @@ class Actor(nn.Module):
 
         # print(gradients)
         # Restore original parameters and gradients
-        for param, original_param in zip(self.flatten_parameters(), original_params):
+        for param, original_param,original_grad in zip(self.parameters(), original_params,original_grads):
             param.data.copy_(original_param)  # Restore original 
+            if original_grad is not None:
+                param.grad = original_grad
 
         return gradients
-
-
- 
     def compute_rollout(self):
         """
         Run rollouts in the `assault-v4` environment and compute log-probabilities and discounted cumulative rewards.
@@ -277,60 +276,7 @@ class Actor(nn.Module):
         cumulative_rewards = torch.tensor(cumulative_rewards, dtype=torch.float32)  # Shape: (5,)
 
         return log_probs, cumulative_rewards
-    def compute_on_policy_gradients(self, states, actions, advantages, critic, theta=None):
-        """
-        Compute policy gradients for on-policy learning
-        
-        Args:
-            states: Batch of states
-            actions: Batch of actions
-            advantages: Advantage estimates
-            critic: Critic network
-            theta: Optional parameter set to use (for perturbation-based estimation)
-            
-        Returns:
-            Computed gradients
-        """
-        # Save original parameters if theta is provided
-        if theta is not None:
-            original_params = [param.clone() for param in self.flatten_parameters()]
-            original_grads = [param.grad.clone() if param.grad is not None else None for param in self.flatten_parameters()]
 
-            # Temporarily set parameters to theta
-            for param, theta_param in zip(self.flatten_parameters(), theta):
-                param.data.copy_(theta_param)
-        
-        # Clear gradients
-        for param in self.parameters():
-            if param.grad is not None:
-                param.grad.zero_()
-                
-        # Forward pass with current parameters
-        action_probs = self(states)
-        action_indices = actions
-        log_probs = torch.log(torch.gather(action_probs, dim=1, index=action_indices))
-        
-        # Compute policy loss (negative for gradient ascent)
-        policy_loss = -torch.mean(advantages * log_probs)
-        
-        # Add entropy bonus for exploration
-        entropy = -torch.mean(torch.sum(action_probs * torch.log(action_probs + 1e-10), dim=1))
-        entropy_bonus = 0.01 * entropy  # Small coefficient for entropy
-        
-        # Total loss with entropy bonus
-        loss = policy_loss - entropy_bonus
-        
-        # Compute gradients
-        loss.backward()
-        
-        # Get the gradients
-        gradients = [param.grad.clone() for param in self.parameters()]
-        
-        # Restore original parameters and gradients if needed
-        if theta is not None:
-            for param, original_param, original_grad in zip(self.flatten_parameters(), original_params, original_grads):
-                param.data.copy_(original_param)
-                if original_grad is not None:
-                    param.grad = original_grad
-        
-        return gradients
+
+ 
+
