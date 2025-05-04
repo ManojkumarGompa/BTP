@@ -6,8 +6,10 @@
 5. verify whether all parts of code are correctly getting updated as per point 4.
 6. Remove the epsilon greedy method and replace with prob categorical distribution(choosing an action).
 7. Learn about Assault Game
+8. pip install opencv-python
+include this in readme
+
+
 
 Changes made to original code till now:
-1. flatten paramters
-2. compute rollout logprobs calculation.
-3. modified epsilong greedy to categorical.
+

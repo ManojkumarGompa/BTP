@@ -1,80 +1,62 @@
-from .actor import Actor
-from .critic import Critic
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from collections import deque
 import math
+from collections import deque
 from utils import config as cfg
+import random
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Configuration parameters
-GAMMA = cfg.GAMMA
-TAU = cfg.TAU
-LR_ACTOR = cfg.LR_ACTOR
-LR_CRITIC = cfg.LR_CRITIC
-action_size = cfg.action_size
-
-# SFAC-specific parameters
-T_MIN = cfg.T_MIN        # Minimum number of perturbations
-T_MAX = cfg.T_MAX        # Maximum number of perturbations
-T_INIT = cfg.T_INIT      # Initial number of perturbations
-BETA_MIN = cfg.BETA_MIN  # Minimum smoothing parameter
-BETA_MAX = cfg.BETA_MAX  # Maximum smoothing parameter
-BETA_INIT = cfg.BETA_INIT  # Initial smoothing parameter
-ETA = cfg.ETA            # Learning rate for T adjustment
-LAMBDA = cfg.LAMBDA      # Learning rate for beta adjustment
-KAPPA = cfg.KAPPA        # Target critic update rate
-TARGET_VARIANCE = cfg.TARGET_VARIANCE  # Target gradient variance
-REWARD_BUFFER_SIZE = cfg.REWARD_BUFFER_SIZE  # Size of reward buffer for reward improvement calculation
-NUM_TRAJECTORIES = cfg.NUM_TRAJECTORIES     # Number of trajectories to collect before each update
-
-delta_T_up = cfg.DELTA_T_UP  # Increment step for T
-delta_T_down = cfg.DELTA_T_DOWN  # Decrement step for T
-
+# Constants for T adjustment
+T_MIN = 20
+T_MAX = 500
+TARGET_VARIANCE = 0.01
+DELTA_T_UP = 100
+DELTA_T_DOWN = 50
 
 class MultiTrajectorySFACAgent:
-    def __init__(self, state_dim, action_size):
-        self.actor = Actor(state_dim, action_size).float()
-        self.critic = Critic(state_dim, action_size).float()
-        self.target_actor = Actor(state_dim, action_size).float()
-        self.target_critic = Critic(state_dim, action_size).float()
+    def __init__(self, state_dim, action_size, actor=None, critic=None):
+        from agents.actor import Actor
+        from agents.critic import Critic
         
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
+        # Initialize actor and critic if not provided
+        self.actor = actor if actor is not None else Actor(state_dim, action_size).to(device)
+        self.critic = critic if critic is not None else Critic(state_dim, action_size).to(device)
         
-        # On-policy trajectory buffers
-        self.trajectory_count = 0
+        # Initialize optimizers with AdamW as recommended
+        self.actor_optimizer = optim.AdamW(
+            self.actor.parameters(), 
+            lr=cfg.LR_ACTOR, 
+            weight_decay=1e-5
+        )
+        self.critic_optimizer = optim.AdamW(
+            self.critic.parameters(), 
+            lr=cfg.LR_CRITIC, 
+            weight_decay=1e-5
+        )
+        
+        # Initialize parameters from config
+        self.beta = cfg.BETA_INIT  # Smoothing parameter
+        self.T = cfg.T_INIT  # Number of perturbations
+        
+        # Initialize buffers for transitions and rewards
         self.states = []
         self.actions = []
         self.rewards = []
         self.next_states = []
         self.dones = []
         
-        # Initialize target networks with current parameters
-        self.update_target_networks(tau=1.0)
-        
-        # SFAC hyperparameters
-        self.T = T_INIT  # Number of perturbations
-        self.beta = BETA_INIT  # Smoothing parameter
-        
-        # Reward buffer for dynamic adjustments
-        self.reward_buffer = deque(maxlen=REWARD_BUFFER_SIZE)
-        
-        # Trajectory rewards
+        # Initialize trajectory tracking
+        self.trajectory_count = 0
         self.trajectory_rewards = []
         
-    def update_target_networks(self, tau=TAU):
-        """Soft update target networks"""
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(KAPPA * param.data + (1.0 - KAPPA) * target_param.data)
-            
+        # Initialize reward buffer for beta adjustment
+        self.reward_buffer = deque(maxlen=cfg.REWARD_BUFFER_SIZE)
+        
     def reset_buffers(self):
-        """Clear trajectory buffers"""
+        """Reset all buffers"""
         self.states = []
         self.actions = []
         self.rewards = []
@@ -99,6 +81,58 @@ class MultiTrajectorySFACAgent:
     def store_episode_reward(self, episode_reward):
         """Store episode reward in the reward buffer for beta adjustment"""
         self.reward_buffer.append(episode_reward)
+        
+    def calculate_advantages(self, rewards, values, next_values, dones, gamma=cfg.GAMMA, lam=cfg.GAE_LAMBDA):
+        """
+        Calculate Generalized Advantage Estimation (GAE) with lambda parameter.
+        
+        Args:
+            rewards: List of rewards
+            values: List of value estimates for states
+            next_values: List of value estimates for next states
+            dones: List of done flags
+            gamma: Discount factor
+            lam: GAE lambda parameter
+            
+        Returns:
+            advantages: Tensor of advantage estimates
+            returns: Tensor of target returns for value function
+        """
+        advantages = []
+        returns = []
+        gae = 0
+        
+        # Calculate returns and advantages
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value = next_values[t]
+            else:
+                next_value = values[t+1]
+                
+            # TD error
+            delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+            
+            # GAE
+            gae = delta + gamma * lam * (1 - dones[t]) * gae
+            
+            # Add to lists
+            advantages.insert(0, gae)
+            returns.insert(0, gae + values[t])
+        
+        # Convert to tensors
+        advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
+        returns = torch.tensor(returns, dtype=torch.float32).to(device)
+        
+        # Normalize advantages
+        if len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
+            # Clip advantages as recommended
+            std = advantages.std()
+            advantages = torch.clamp(advantages, -5 * std, 5 * std)
+        
+        return advantages, returns
+    
     def calculate_analytical_gradient_variance(self, J_theta, gradient, sfac_gradient):
         """
         Calculate gradient variance analytically using the corrected formula:
@@ -107,61 +141,29 @@ class MultiTrajectorySFACAgent:
         """
         T = self.T
         beta = self.beta
-        # Print the shapes of sfac_gradient and gradient
-
 
         # Initialize variance accumulator
         variance_accumulator = 0.0
 
         for i in range(T):
             # Sample perturbation ρ_i (Gaussian noise)
-            print(f"i: {i}, T: {T}")
-            rho = [torch.randn_like(param) for param in self.actor.parameters()]
+            rho = torch.randn_like(gradient)
 
             # Compute the variance term for this perturbation
-            gradient_difference = [
-                beta * r * (J_theta + (beta / T) * g.item()) - sfac_g.item()
-                for r, g, sfac_g in zip(rho, gradient, sfac_gradient)
-            ]
-            gradient_difference_norm = sum(
-                torch.sum(diff ** 2) for diff in gradient_difference
-            )
-            variance_accumulator += gradient_difference_norm
+            if isinstance(sfac_gradient, list):
+                # Convert list of tensors to a single tensor
+                sfac_gradient_tensor = torch.cat([sg.view(-1) for sg in sfac_gradient])
+            else:
+                sfac_gradient_tensor = sfac_gradient
+
+            gradient_difference = beta * rho * (J_theta + (beta / T) * gradient) - sfac_gradient_tensor
+            gradient_difference_norm_squared = torch.sum(gradient_difference ** 2).item()
+            variance_accumulator += gradient_difference_norm_squared
 
         # Final variance calculation
-        gradient_variance = variance_accumulator / (T - 1)
+        gradient_variance = variance_accumulator / (T - 1) if T > 1 else variance_accumulator
         return gradient_variance
-    # def calculate_analytical_gradient_variance(self, gradient):
-    #     """
-    #     Calculate gradient variance analytically using Taylor expansion
-        
-    #     σ_g^2 ≈ β^2 · Tr(∇J(θ)∇J(θ)^T) = β^2 · ||∇J(θ)||_2^2
-    #     """
-    #     # Flatten and concatenate all gradients
-    #     flat_gradient = torch.cat([g.view(-1) for g in gradient])
-        
-    #     # Calculate L2 norm squared
-    #     gradient_norm_squared = torch.sum(flat_gradient ** 2).item()
-        
-    #     # Analytical variance
-    #     variance = self.beta ** 2 * gradient_norm_squared
-        
-    #     return variance
     
-    # def adjust_T(self, gradient_variance):
-    #     """
-    #     Adjust number of perturbations based on gradient variance
-        
-    #     T ← clip(T · exp(η · (σ_g^2 - τ_target)), T_min, T_max)
-    #     """
-    #     # Adjust T exponentially based on difference from target variance
-    #     adjustment = math.exp(ETA * (gradient_variance - TARGET_VARIANCE))
-    #     new_T = int(self.T * adjustment)
-        
-    #     # Clip T to valid range
-    #     self.T = max(T_MIN, min(T_MAX, new_T))
-        
-    #     print(f"Adjusted T to {self.T} based on variance: {gradient_variance:.4f}")
     def adjust_T(self, gradient_variance):
         """
         Adjust number of perturbations based on gradient variance.
@@ -173,132 +175,134 @@ class MultiTrajectorySFACAgent:
         """
         if gradient_variance > TARGET_VARIANCE:
             # Too noisy, increase T
-            self.T = min(self.T + delta_T_up, T_MAX)
+            self.T = min(self.T + DELTA_T_UP, T_MAX)
         elif gradient_variance < TARGET_VARIANCE:
             # Too stable, decrease T
-            self.T = max(self.T - delta_T_down, T_MIN)
+            self.T = max(self.T - DELTA_T_DOWN, T_MIN)
         
         print(f"Adjusted T to {self.T} based on variance: {gradient_variance:.4f}")
     
     def adjust_beta(self):
         """
-        Adjust beta based on reward improvement
-        
-        β ← clip(β · exp(-λ · sign(ΔR)), β_min, β_max)
+        Adaptive adjustment of beta based on reward trends.
+        Increase if improving, decrease if plateauing or declining.
         """
-        if len(self.reward_buffer) < REWARD_BUFFER_SIZE // 2:
+        if len(self.reward_buffer) < 10:
             return  # Not enough data
+            
+        # Get recent and past rewards
+        recent_rewards = list(self.reward_buffer)[-5:]
+        past_rewards = list(self.reward_buffer)[-10:-5]
         
-        # Calculate reward improvement
-        k = REWARD_BUFFER_SIZE // 2
-        recent_rewards = list(self.reward_buffer)[-k:]
-        previous_rewards = list(self.reward_buffer)[-(2*k):-k]
-        
-        if not previous_rewards:
-            return  # Not enough historical data
-        
-        # Calculate average rewards
+        # Calculate averages
         recent_avg = sum(recent_rewards) / len(recent_rewards)
-        previous_avg = sum(previous_rewards) / len(previous_rewards)
+        past_avg = sum(past_rewards) / len(past_rewards)
         
-        # Reward improvement
-        delta_R = recent_avg - previous_avg
+        # Adjust beta based on improvement
+        if recent_avg > past_avg * 1.05:  # 5% improvement
+            # Increasing rewards, decrease beta to exploit
+            self.beta = max(cfg.BETA_MIN, self.beta * cfg.BETA_DECREASE_FACTOR)
+            print(f"Rewards improving, decreasing beta to {self.beta:.4f}")
+        elif recent_avg < past_avg * 0.95:  # 5% decline
+            # Decreasing rewards, increase beta to explore
+            self.beta = min(cfg.BETA_MAX, self.beta * cfg.BETA_INCREASE_FACTOR)
+            print(f"Rewards declining, increasing beta to {self.beta:.4f}")
+        # Else, keep beta the same
         
-        # Adjust beta based on sign of reward improvement
-        # If rewards are improving (delta_R > 0), decrease beta (more exploitation)
-        # If rewards are declining (delta_R < 0), increase beta (more exploration)
-        adjustment = math.exp(-LAMBDA * np.sign(delta_R))
-        new_beta = self.beta * adjustment
-        
-        # Clip beta to valid range
-        self.beta = max(BETA_MIN, min(BETA_MAX, new_beta))
-        
-        print(f"Adjusted beta to {self.beta:.4f} based on reward change: {delta_R:.2f}")
-    
-    def has_enough_trajectories(self):
-        """Check if enough trajectories have been collected for an update"""
-        return self.trajectory_count >= NUM_TRAJECTORIES
-    
-    def update(self):
-        """Update policy and value functions using multiple trajectories with SFAC"""
-        # If no transitions stored, skip update
-        if len(self.states) == 0:
-            return 0
-        
-        # Convert stored trajectories to tensors
-        states = torch.FloatTensor(np.stack(self.states))
-        actions = torch.LongTensor(self.actions).unsqueeze(1)
-        rewards = torch.FloatTensor(self.rewards).unsqueeze(1)
-        next_states = torch.FloatTensor(np.stack(self.next_states))
-        dones = torch.FloatTensor(self.dones).unsqueeze(1)
-
-        # Create one-hot actions for critic input
-        actions_one_hot = torch.zeros(len(self.actions), action_size).scatter(1, actions, 1)
-
-        # ----- Update Critic -----
-        print("updating the critic")
-        with torch.no_grad():
-            # Get next actions from current policy (on-policy)
-            target_next_actions = self.target_actor(next_states)
-            # Get target Q values using target critic
-            target_q_values = rewards + (1 - dones) * GAMMA * self.target_critic(next_states, target_next_actions)
-
-        # Get current Q values
-        current_q_values = self.critic(states, actions_one_hot)
-        
-        # Compute critic loss
-        critic_loss = nn.MSELoss()(current_q_values, target_q_values)
-        
-        # Update critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-
-   
-
-        
-        # Calculate analytical gradient variance
-        print("updating the actor")
-        self.actor_optimizer.zero_grad()
-        smoothened_gradient,original_gradient,original_loss=self.actor.smoothened_gradient_update(states,actions,self.critic,self.beta,self.T)
-        # gradient_variance = self.calculate_analytical_gradient_variance(-1*original_loss, original_gradient,smoothened_gradient)
-        # print(f"Gradient variance: {gradient_variance:.4f}")
-        
-        # Adjust number of perturbations
-        # self.adjust_T(gradient_variance)
-        
-     
-        self.assign_flat_list_to_param_grads(smoothened_gradient)
-        
-        # Update actor
-        self.actor_optimizer.step()
-        
-        # Update target networks
-        self.update_target_networks()
-        
-        # Calculate average reward from trajectories
-        avg_trajectory_reward = sum(self.trajectory_rewards) / len(self.trajectory_rewards)
-        
-        # Adjust beta based on reward progression
-        self.store_episode_reward(avg_trajectory_reward)
-        self.adjust_beta()
-        
-      
-        print("updated the agent(actor and critic)")
-        
-        return critic_loss.item()
-    def assign_flat_list_to_param_grads(self, flat_grad_list):
+    def update(self, batch_size=cfg.BATCH_SIZE):
         """
-        Assign a flat list of gradient tensors (scalars or small tensors)
-        to the .grad fields of model parameters by reshaping appropriately.
+        Update actor and critic networks using collected transitions and SFAC.
         """
-        idx = 0
-        for param in self.actor.parameters():
-            numel = param.numel()
-            # Collect next `numel` gradient scalars
-            flat_slice = flat_grad_list[idx:idx + numel]
-            # Stack and reshape to match the parameter's shape
-            reshaped = torch.stack(flat_slice).view_as(param)
-            param.grad = reshaped.clone()
-            idx += numel
-
+        # Convert lists to tensors
+        states = torch.FloatTensor(np.array(self.states)).to(device)
+        next_states = torch.FloatTensor(np.array(self.next_states)).to(device)
+        actions = torch.LongTensor(np.array(self.actions)).unsqueeze(1).to(device)
+        rewards = torch.FloatTensor(np.array(self.rewards)).unsqueeze(1).to(device)
+        dones = torch.FloatTensor(np.array(self.dones)).unsqueeze(1).to(device)
+        
+        # Process in batches to avoid memory issues
+        n_batches = max(1, len(self.states) // batch_size)
+        indices = np.arange(len(self.states))
+        np.random.shuffle(indices)
+        
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(self.states))
+            batch_indices = indices[start_idx:end_idx]
+            
+            # Get batch data
+            batch_states = states[batch_indices]
+            batch_next_states = next_states[batch_indices]
+            batch_actions = actions[batch_indices]
+            batch_rewards = rewards[batch_indices]
+            batch_dones = dones[batch_indices]
+            
+            # Get action probabilities for current and next states
+            action_probs = self.actor(batch_states)
+            next_action_probs = self.actor(batch_next_states).detach()
+            
+            # Convert actions to one-hot encoding for critic input
+            actions_one_hot = torch.zeros(batch_actions.size(0), self.actor.policy_mean.out_features).to(device)
+            actions_one_hot.scatter_(1, batch_actions, 1)
+            
+            # Compute values and next values
+            with torch.no_grad():
+                next_values = self.critic(batch_next_states, next_action_probs)
+            values = self.critic(batch_states, action_probs)
+            
+            # Calculate advantages using GAE - FIX: Detach tensors before numpy conversion
+            advantages, returns = self.calculate_advantages(
+                batch_rewards.cpu().detach().numpy().flatten(),
+                values.cpu().detach().numpy().flatten(),
+                next_values.cpu().detach().numpy().flatten(),
+                batch_dones.cpu().detach().numpy().flatten()
+            )
+            advantages = torch.FloatTensor(advantages).to(device)
+            returns = torch.FloatTensor(returns).to(device)
+            
+            # Update critic
+            self.critic_optimizer.zero_grad()
+            critic_value = self.critic(batch_states, action_probs)
+            critic_loss = nn.MSELoss()(critic_value, returns.unsqueeze(1))
+            critic_loss.backward()
+            # Apply gradient clipping to critic
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+            self.critic_optimizer.step()
+            
+            # Update actor using SFAC
+            # Get smoothened gradient
+            sfac_gradient, original_gradient, original_loss = self.actor.smoothened_gradient_update(
+                batch_states, batch_actions, self.critic,
+                beta=self.beta, num_perturbations=self.T, advantages=advantages
+            )
+            
+            # Apply smoothened gradient
+            self.actor_optimizer.zero_grad()
+            
+            # Set gradients for parameters based on smoothened gradient
+            if isinstance(sfac_gradient, torch.Tensor):
+                # If sfac_gradient is a single flattened tensor
+                idx = 0
+                for param in self.actor.parameters():
+                    num_params = param.numel()
+                    param.grad = sfac_gradient[idx:idx+num_params].view(param.shape)
+                    idx += num_params
+            else:
+                # If sfac_gradient is a list of tensors
+                for param, sg in zip(self.actor.parameters(), sfac_gradient):
+                    param.grad = sg.view_as(param)
+            
+            # Apply gradient clipping to actor
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+            self.actor_optimizer.step()
+            
+            # Calculate gradient variance for T adjustment
+            # gradient_variance = self.calculate_analytical_gradient_variance(
+            #     original_loss.item(), original_gradient, sfac_gradient
+            # )
+            
+            # Adjust T based on gradient variance
+            # self.adjust_T(gradient_variance)
+        
+        # Clear buffers after update
+        self.reset_buffers()
