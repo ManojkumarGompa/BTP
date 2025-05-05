@@ -24,9 +24,9 @@ HIDDEN2_DIM = 256
 
 # SFAC parameters
 BETA_INIT = 0.99
-T_INIT = 50
+T_INIT = 100
 T_MIN = 20
-T_MAX = 50
+T_MAX = 100
 TARGET_VARIANCE = 0.01
 
 # Batch and buffer sizes

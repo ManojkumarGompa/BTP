@@ -236,8 +236,14 @@ class MultiTrajectorySFACAgent:
             next_values.cpu().detach().numpy().flatten(),
             dones.cpu().detach().numpy().flatten()
         )
-        advantages = torch.FloatTensor(advantages).to(device)
-        returns = torch.FloatTensor(returns).to(device)
+        # No need to convert to tensor again since calculate_advantages already returns tensors
+        # Just make sure they are on the right device
+        if advantages.device != device:
+            advantages = advantages.to(device)
+        if returns.device != device:
+            returns = returns.to(device)
+        # advantages = torch.FloatTensor(advantages).to(device)
+        # returns = torch.FloatTensor(returns).to(device)
         
         # Multiple epochs of training, like PPO
         for epoch in range(n_epochs):
