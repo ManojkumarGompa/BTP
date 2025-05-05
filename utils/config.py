@@ -10,7 +10,7 @@ SEED = 42
 ALGORITHM = "sfac"  # Options: "sfac", "pg" (policy gradient)
 
 # Training parameters
-NUM_EPISODES = 10
+NUM_EPISODES = 1000
 MAX_STEPS_PER_EPISODE = 10000
 GAMMA = 0.99
 
@@ -23,7 +23,7 @@ HIDDEN1_DIM = 512
 HIDDEN2_DIM = 256
 
 # SFAC parameters
-BETA_INIT = 1
+BETA_INIT = 2
 T_INIT = 50
 T_MIN = 20
 T_MAX = 50
@@ -42,7 +42,7 @@ CRITIC_MAX_GRAD_NORM = 1.0
 # Beta adjustment parameters
 BETA_INCREASE_FACTOR = 1.1
 BETA_DECREASE_FACTOR = 0.9
-BETA_MIN = 0.1
+BETA_MIN = 0.3
 BETA_MAX = 5.0
 
 # T adjustment parameters
@@ -67,7 +67,7 @@ EVAL_EPISODES = 10  # Number of episodes for evaluation
 RENDER_EVAL = False  # Whether to render evaluation episodes
 
 # Checkpoint parameters
-SAVE_FREQUENCY = 5  # Episodes between checkpoints
+SAVE_FREQUENCY = 50  # Episodes between checkpoints
 EARLY_STOPPING_PATIENCE = 20  # Number of evals with no improvement before stopping
 
 # Add these to config.py
