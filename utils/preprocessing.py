@@ -43,8 +43,8 @@ class AtariPreprocessor:
         return stacked_frames
         
     def clip_reward(self, reward):
-        """Clip rewards to [-1, 1]"""
-        return np.clip(reward, -1.0, 1.0)
+        # return np.clip(reward, -1.0, 1.0)
+        return reward/10.0
         
     def to_tensor(self, state):
         """Convert state to tensor"""

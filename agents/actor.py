@@ -32,6 +32,9 @@ class Actor(nn.Module):
         # Activation functions
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.2)
+
+
+        self.training_steps = 0
         
         # Initialize weights orthogonally for better training
         self._initialize_weights()
@@ -86,12 +89,9 @@ class Actor(nn.Module):
         """
         Sample an action from the policy distribution with epsilon-greedy exploration
         """
-        # epsilon = 0.1  # Exploration rate
-        
-        # if random.random() < epsilon:
-        #     # Random action based on action space
-        #     action = torch.randint(0, action_probs.size(-1), (1,)).item()
-        #     return action
+        epsilon = 0.2 * (1.0 - (self.training_steps / 1e3))  # Decay over time
+        if random.random() < epsilon:
+            return env.action_space.sample() 
         
         # Check for NaN values in action probabilities
         if torch.isnan(action_probs).any():
@@ -137,6 +137,7 @@ class Actor(nn.Module):
         Returns:
             Smoothened gradient estimates, original gradients, and loss
         """
+        self.training_steps += 1
         # Flatten parameters for efficient operations
         flattened_params = self.flatten_parameters()
         
@@ -220,7 +221,8 @@ class Actor(nn.Module):
         # Restore original parameters
         for param, orig in zip(self.parameters(), original_params):
             param.data.copy_(orig)
-            
+        grad_theta1 = grad_theta1 / (grad_theta1.norm() + 1e-8)
+        grad_theta2 = grad_theta2 / (grad_theta2.norm() + 1e-8)
         # Calculate gradient differences for second-order term
         delta_G_k = grad_theta1 - grad_theta2
         perturbation_buffer = torch.empty_like(flattened_params) 

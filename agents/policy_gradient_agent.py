@@ -6,45 +6,40 @@ import torch.optim as optim
 import numpy as np
 from utils import config as cfg
 from collections import deque
+import gc
 
-# Configuration parameters
-GAMMA = cfg.GAMMA
-TAU = cfg.TAU
-LR_ACTOR = cfg.LR_ACTOR
-LR_CRITIC = cfg.LR_CRITIC
-action_size = cfg.action_size
-NUM_TRAJECTORIES = 5  # Number of trajectories to collect before each update
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class PolicyGradientAgent:
-    def __init__(self, state_dim, action_size):
-        self.actor = Actor(state_dim, action_size).float()
-        self.critic = Critic(state_dim, action_size).float()
-        self.target_actor = Actor(state_dim, action_size).float()
-        self.target_critic = Critic(state_dim, action_size).float()
+    def __init__(self, state_dim, action_size, actor=None, critic=None):
+        # Initialize actor and critic if not provided
+        self.actor = actor if actor is not None else Actor(state_dim, action_size).to(device)
+        self.critic = critic if critic is not None else Critic(state_dim, action_size).to(device)
         
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
+        # Initialize optimizers with AdamW as recommended for better performance
+        self.actor_optimizer = optim.AdamW(
+            self.actor.parameters(), 
+            lr=cfg.LR_ACTOR,
+            weight_decay=1e-5
+        )
+        self.critic_optimizer = optim.AdamW(
+            self.critic.parameters(), 
+            lr=cfg.LR_CRITIC,
+            weight_decay=1e-5
+        )
         
         # On-policy trajectory buffers
-        self.trajectory_count = 0
         self.states = []
         self.actions = []
         self.rewards = []
         self.next_states = []
         self.dones = []
+        
+        # Initialize reward tracking
+        self.trajectory_count = 0
         self.trajectory_rewards = []
+        self.reward_buffer = deque(maxlen=cfg.REWARD_BUFFER_SIZE)
         
-        # Initialize target networks with current parameters
-        self.update_target_networks(tau=1.0)
-        
-    def update_target_networks(self, tau=TAU):
-        """Soft update target networks"""
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-            
     def reset_buffers(self):
         """Clear trajectory buffers"""
         self.states = []
@@ -68,66 +63,146 @@ class PolicyGradientAgent:
         self.trajectory_rewards.append(trajectory_reward)
         self.trajectory_count += 1
     
-    def has_enough_trajectories(self):
-        """Check if enough trajectories have been collected for an update"""
-        return self.trajectory_count >= NUM_TRAJECTORIES
+    def store_episode_reward(self, episode_reward):
+        """Store episode reward in the reward buffer"""
+        self.reward_buffer.append(episode_reward)
     
-    def update(self):
-        """Update policy and value functions using regular policy gradient"""
-        # If no transitions stored, skip update
-        if len(self.states) == 0:
-            return 0
+    def calculate_advantages(self, rewards, values, next_values, dones, gamma=cfg.GAMMA, lam=cfg.GAE_LAMBDA):
+        """
+        Calculate Generalized Advantage Estimation (GAE) with lambda parameter.
+        Maintains consistency with SFAC implementation.
+        """
+        advantages = []
+        returns = []
+        gae = 0
+        
+        # Calculate returns and advantages
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value = next_values[t]
+            else:
+                next_value = values[t+1]
+                
+            # TD error
+            delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+            
+            # GAE
+            gae = delta + gamma * lam * (1 - dones[t]) * gae
+            
+            # Add to lists
+            advantages.insert(0, gae)
+            returns.insert(0, gae + values[t])
+        
+        # Convert to tensors
+        advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
+        returns = torch.tensor(returns, dtype=torch.float32).to(device)
+        
+        # Normalize advantages
+        if len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
+            # Clip advantages for stability
+            std = advantages.std()
+            advantages = torch.clamp(advantages, -5 * std, 5 * std)
+        
+        return advantages, returns
+            
+    def update(self, batch_size=cfg.BATCH_SIZE, n_epochs=cfg.N_EPOCHS):
+        """
+        Update policy and value functions using regular policy gradient
+        with multiple epochs for data efficiency (similar to SFAC)
+        """
+        # If not enough data, skip update
+        if len(self.states) < batch_size:
+            return
         
         # Convert stored trajectories to tensors
-        states = torch.FloatTensor(np.stack(self.states))
-        actions = torch.LongTensor(self.actions).unsqueeze(1)
-        rewards = torch.FloatTensor(self.rewards).unsqueeze(1)
-        next_states = torch.FloatTensor(np.stack(self.next_states))
-        dones = torch.FloatTensor(self.dones).unsqueeze(1)
-
-        # Create one-hot actions for critic input
-        actions_one_hot = torch.zeros(len(self.actions), action_size).scatter(1, actions, 1)
-
-        # ----- Update Critic -----
+        states = torch.FloatTensor(np.array(self.states)).to(device)
+        next_states = torch.FloatTensor(np.array(self.next_states)).to(device)
+        actions = torch.LongTensor(np.array(self.actions)).unsqueeze(1).to(device)
+        rewards = torch.FloatTensor(np.array(self.rewards)).unsqueeze(1).to(device)
+        dones = torch.FloatTensor(np.array(self.dones)).unsqueeze(1).to(device)
+        
+        # Pre-compute action probabilities and values to save computation
         with torch.no_grad():
-            # Get next actions from current policy (on-policy)
-            next_actions_probs = self.actor(next_states)
-            # Get target Q values using target critic
-            target_q_values = rewards + (1 - dones) * GAMMA * self.target_critic(next_states, next_actions_probs)
-
-        # Get current Q values
-        current_q_values = self.critic(states, actions_one_hot)
+            action_probs = self.actor(states)
+            next_action_probs = self.actor(next_states)
+            values = self.critic(states, action_probs)
+            next_values = self.critic(next_states, next_action_probs)
         
-        # Compute critic loss
-        critic_loss = nn.MSELoss()(current_q_values, target_q_values)
+        # Calculate advantages and returns once
+        advantages, returns = self.calculate_advantages(
+            rewards.cpu().detach().numpy().flatten(),
+            values.cpu().detach().numpy().flatten(),
+            next_values.cpu().detach().numpy().flatten(),
+            dones.cpu().detach().numpy().flatten()
+        )
+        advantages = torch.FloatTensor(advantages).to(device)
+        returns = torch.FloatTensor(returns).to(device)
         
-        # Update critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-
-        # ----- Update Actor using Regular Policy Gradient -----
-        self.actor_optimizer.zero_grad()
+        # Multiple epochs of training for better data efficiency
+        total_critic_loss = 0
+        total_actor_loss = 0
         
-        # Get action probabilities
-        action_probs = self.actor(states)
+        for epoch in range(n_epochs):
+            # Process in minibatches
+            n_minibatches = max(1, len(self.states) // batch_size)
+            indices = np.arange(len(self.states))
+            np.random.shuffle(indices)
+            
+            for batch_idx in range(n_minibatches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, len(self.states))
+                batch_indices = indices[start_idx:end_idx]
+                
+                # Get batch data
+                batch_states = states[batch_indices]
+                batch_actions = actions[batch_indices]
+                batch_advantages = advantages[batch_indices]
+                batch_returns = returns[batch_indices]
+                
+                # Update critic
+                self.critic_optimizer.zero_grad()
+                with torch.no_grad():
+                    batch_action_probs = self.actor(batch_states).detach() 
+                batch_values = self.critic(batch_states, batch_action_probs)
+                critic_loss = nn.MSELoss()(batch_values, batch_returns.unsqueeze(1))
+                critic_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+                self.critic_optimizer.step()
+                
+                total_critic_loss += critic_loss.item()
+                
+                # Update actor using policy gradient
+                self.actor_optimizer.zero_grad()
+                batch_action_probs = self.actor(batch_states)
+                log_probs = torch.log(torch.gather(batch_action_probs, 1, batch_actions))
+                
+                # Add entropy regularization for exploration
+                entropy = -torch.mean(torch.sum(batch_action_probs * 
+                                               torch.log(batch_action_probs + 1e-10), dim=1))
+                
+                # Policy loss with entropy bonus
+                actor_loss = -torch.mean(log_probs * batch_advantages.unsqueeze(1)) - cfg.ENTROPY_COEF * entropy
+                actor_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+                self.actor_optimizer.step()
+                
+                total_actor_loss += actor_loss.item()
+            
+            # Memory cleanup after each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         
-        # Get log probabilities of actions taken
-        log_probs = torch.log(torch.gather(action_probs, 1, actions))
+        # Final memory cleanup
+        del states, next_states, actions, rewards, dones, advantages, returns
+        gc.collect()
         
-        # Get advantage estimates using critic
-        with torch.no_grad():
-            state_values = self.critic(states, action_probs)
-            advantages = target_q_values - state_values
+        # Reset buffers after update
+        self.reset_buffers()
         
-        # Compute policy gradient loss (negative for gradient ascent)
-        actor_loss = -torch.mean(log_probs * advantages)
-        
-        # Update actor
-        actor_loss.backward()
-        self.actor_optimizer.step()
-        
-        # Update target networks
-        self.update_target_networks()
-        
-        return critic_loss.item()
+        # Return average losses
+        avg_critic_loss = total_critic_loss / (n_epochs * n_minibatches)
+        avg_actor_loss = total_actor_loss / (n_epochs * n_minibatches)
+        return avg_critic_loss, avg_actor_loss

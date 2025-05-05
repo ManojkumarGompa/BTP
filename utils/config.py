@@ -10,7 +10,7 @@ SEED = 42
 ALGORITHM = "sfac"  # Options: "sfac", "pg" (policy gradient)
 
 # Training parameters
-NUM_EPISODES = 1000
+NUM_EPISODES = 10
 MAX_STEPS_PER_EPISODE = 10000
 GAMMA = 0.99
 
@@ -67,7 +67,7 @@ EVAL_EPISODES = 10  # Number of episodes for evaluation
 RENDER_EVAL = False  # Whether to render evaluation episodes
 
 # Checkpoint parameters
-SAVE_FREQUENCY = 50  # Episodes between checkpoints
+SAVE_FREQUENCY = 5  # Episodes between checkpoints
 EARLY_STOPPING_PATIENCE = 20  # Number of evals with no improvement before stopping
 
 # Add these to config.py

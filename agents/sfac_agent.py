@@ -198,17 +198,15 @@ class MultiTrajectorySFACAgent:
         recent_avg = sum(recent_rewards) / len(recent_rewards)
         past_avg = sum(past_rewards) / len(past_rewards)
         
-        # Adjust beta based on improvement
-        if recent_avg > past_avg * 1.05:  # 5% improvement
-            # Increasing rewards, decrease beta to exploit
-            self.beta = max(cfg.BETA_MIN, self.beta * cfg.BETA_DECREASE_FACTOR)
-            print(f"Rewards improving, decreasing beta to {self.beta:.4f}")
-        elif recent_avg < past_avg * 0.95:  # 5% decline
-            # Decreasing rewards, increase beta to explore
-            self.beta = min(cfg.BETA_MAX, self.beta * cfg.BETA_INCREASE_FACTOR)
-            print(f"Rewards declining, increasing beta to {self.beta:.4f}")
-        # Else, keep beta the same
-    # @profile    
+        # Replace with delta-based adjustment
+        delta = (recent_avg - past_avg) / (abs(past_avg) + 1e-8)
+        if delta > 0.1:  # 10%+ improvement
+            self.beta = max(cfg.BETA_MIN, self.beta * 0.95)
+        elif delta < -0.1:  # 10%+ decline
+            self.beta = min(cfg.BETA_MAX, self.beta * 1.05)
+        else:  # Stable phase
+            self.beta = self.beta * 0.997  # Slow decay
+            # @profile    
     def update(self, batch_size=cfg.BATCH_SIZE, n_epochs=cfg.N_EPOCHS):
         """
         Update actor and critic networks using collected transitions and SFAC.
