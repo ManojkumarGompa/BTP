@@ -133,3 +133,38 @@ def save_rewards_to_file(rewards, algorithm_name, run_name, save_dir="results"):
         json.dump(data, f, indent=4)
     
     return file_path
+def plot_beta_history(beta_history, save_path=None, alpha=0.95):
+    """
+    Plot the history of beta parameter adjustments
+    
+    Args:
+        beta_history: List of beta values across episodes
+        save_path: Path to save the plot
+        alpha: Smoothing factor for Polyak averaging
+    """
+    plt.figure(figsize=(12, 6))
+    
+    # Plot raw beta values
+    episodes = np.arange(len(beta_history)) + 1
+    plt.plot(episodes, beta_history, 'g-', alpha=0.5, label='Beta values')
+    
+    # Plot smoothed beta values
+    if len(beta_history) > 1:
+        smoothed = polyak_moving_average(beta_history, alpha)
+        plt.plot(episodes, smoothed, 'b-', linewidth=2, label=f'Smoothed (α={alpha})')
+    
+    plt.xlabel('Episodes')
+    plt.ylabel('Beta Value')
+    plt.title('SFAC Beta Parameter Evolution')
+    plt.legend()
+    plt.grid(True)
+    
+    # Add horizontal lines for min and max beta
+    plt.axhline(y=0.1, color='r', linestyle='--', alpha=0.5, label='Min Beta')
+    plt.axhline(y=5.0, color='r', linestyle='--', alpha=0.5, label='Max Beta')
+    
+    if save_path:
+        plt.savefig(save_path)
+        plt.close()
+    else:
+        plt.show()

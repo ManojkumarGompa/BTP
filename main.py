@@ -11,6 +11,7 @@ from agents.critic import Critic
 from agents.sfac_agent import MultiTrajectorySFACAgent
 from utils.preprocessing import AtariPreprocessor
 from utils import config as cfg
+from utils.plotting import plot_beta_history
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -69,6 +70,7 @@ def train_sfac():
     no_improvement_count = 0
     episode = 0
     episode_rewards = []  # Track all episode rewards
+    beta_history = []  # Track beta over time
     
     # Main training loop
     while episode < cfg.NUM_EPISODES:
@@ -115,6 +117,7 @@ def train_sfac():
         # Store episode reward
         agent.store_episode_reward(episode_reward)
         episode_rewards.append(episode_reward)  # Add to our tracking list
+        beta_history.append(agent.beta)
         
         # Log episode information
         agent.adjust_beta()
@@ -138,6 +141,10 @@ def train_sfac():
             plot_path = os.path.join("plots", f"{run_name}_ep{episode}.png")
             plot_learning_curve(episode_rewards, "SFAC", save_path=plot_path)
             print(f"Plot saved to {plot_path}")
+            # Create and save beta plot
+            beta_plot_path = os.path.join("plots", f"{run_name}_beta_ep{episode}.png")
+            plot_beta_history(beta_history, save_path=beta_plot_path)
+            print(f"Beta plot saved to {beta_plot_path}")
             
             # Save rewards data
             rewards_path = save_rewards_to_file(episode_rewards, "SFAC", run_name)
@@ -148,7 +155,19 @@ def train_sfac():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
+    # Save beta history to file
+    beta_data = {
+        'algorithm': 'SFAC',
+        'run_name': run_name,
+        'beta_history': beta_history,
+        'timestamp': datetime.now().strftime('%Y%m%d-%H%M%S')
+    }
     
+    beta_file_path = os.path.join("results", f"SFAC_{run_name}_beta.json")
+    with open(beta_file_path, 'w') as f:
+        json.dump(beta_data, f, indent=4)
+
+
     # Save final model
     torch.save({
         'actor': agent.actor.state_dict(),
@@ -360,8 +379,8 @@ def main():
     
     # Train based on selected algorithm in config
     if cfg.ALGORITHM == "sfac":
-        pg_agent,pg_rewards,pg_run_name = train_policy_gradient()
         sfac_agent,sfac_rewards,sfac_run_name = train_sfac()
+        pg_agent,pg_rewards,pg_run_name = train_policy_gradient()
         comparison_path = os.path.join("plots", f"comparison_{datetime.now().strftime('%Y%m%d-%H%M%S')}.png")
         plot_comparison(sfac_rewards=sfac_rewards, pg_rewards=pg_rewards, save_path=comparison_path)
         print(f"Comparison plot saved to {comparison_path}")
