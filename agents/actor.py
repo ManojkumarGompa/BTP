@@ -86,12 +86,12 @@ class Actor(nn.Module):
         """
         Sample an action from the policy distribution with epsilon-greedy exploration
         """
-        epsilon = 0.1  # Exploration rate
+        # epsilon = 0.1  # Exploration rate
         
-        if random.random() < epsilon:
-            # Random action based on action space
-            action = torch.randint(0, action_probs.size(-1), (1,)).item()
-            return action
+        # if random.random() < epsilon:
+        #     # Random action based on action space
+        #     action = torch.randint(0, action_probs.size(-1), (1,)).item()
+        #     return action
         
         # Check for NaN values in action probabilities
         if torch.isnan(action_probs).any():

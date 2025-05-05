@@ -23,7 +23,7 @@ HIDDEN1_DIM = 512
 HIDDEN2_DIM = 256
 
 # SFAC parameters
-BETA_INIT = 0.5
+BETA_INIT = 1
 T_INIT = 50
 T_MIN = 20
 T_MAX = 50
@@ -67,7 +67,7 @@ EVAL_EPISODES = 10  # Number of episodes for evaluation
 RENDER_EVAL = False  # Whether to render evaluation episodes
 
 # Checkpoint parameters
-SAVE_FREQUENCY = 500  # Episodes between checkpoints
+SAVE_FREQUENCY = 50  # Episodes between checkpoints
 EARLY_STOPPING_PATIENCE = 20  # Number of evals with no improvement before stopping
 
 # Add these to config.py

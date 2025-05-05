@@ -23,8 +23,9 @@ def make_env(env_name,render_mode=None):
 
 def train_sfac():
     """Train the SFAC agent on the specified environment"""
+    env_name_safe = cfg.ENV_NAME.replace('/', '_')
     # Create log directory
-    run_name = f"SFAC_{cfg.ENV_NAME}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    run_name = f"SFAC_{env_name_safe}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     log_dir = os.path.join("logs", run_name)
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs("checkpoints", exist_ok=True)
@@ -118,28 +119,28 @@ def train_sfac():
         # Adjust beta based on reward trends
         agent.adjust_beta()
         
-        # Periodic evaluation
-        if episode % cfg.EVAL_FREQUENCY == 0:
-            eval_reward = evaluate(agent, eval_env, preprocessor)
-            writer.add_scalar("Evaluation/Average_Reward", eval_reward, episode)
+        # # Periodic evaluation
+        # if episode % cfg.EVAL_FREQUENCY == 0:
+        #     eval_reward = evaluate(agent, eval_env, preprocessor)
+        #     writer.add_scalar("Evaluation/Average_Reward", eval_reward, episode)
             
-            # Save best model
-            if eval_reward > best_eval_reward:
-                best_eval_reward = eval_reward
-                torch.save({
-                    'actor': agent.actor.state_dict(),
-                    'critic': agent.critic.state_dict(),
-                    'episode': episode,
-                    'reward': eval_reward
-                }, os.path.join("checkpoints", f"{run_name}_best.pt"))
-                no_improvement_count = 0
-            else:
-                no_improvement_count += 1
+        #     # Save best model
+        #     if eval_reward > best_eval_reward:
+        #         best_eval_reward = eval_reward
+        #         torch.save({
+        #             'actor': agent.actor.state_dict(),
+        #             'critic': agent.critic.state_dict(),
+        #             'episode': episode,
+        #             'reward': eval_reward
+        #         }, os.path.join("checkpoints", f"{run_name}_best.pt"))
+        #         no_improvement_count = 0
+        #     else:
+        #         no_improvement_count += 1
             
-            # Early stopping
-            if no_improvement_count >= cfg.EARLY_STOPPING_PATIENCE:
-                print(f"No improvement for {cfg.EARLY_STOPPING_PATIENCE} evaluations. Stopping training.")
-                break
+        #     # Early stopping
+        #     if no_improvement_count >= cfg.EARLY_STOPPING_PATIENCE:
+        #         print(f"No improvement for {cfg.EARLY_STOPPING_PATIENCE} evaluations. Stopping training.")
+        #         break
             
         # Periodic saving
         if episode % cfg.SAVE_FREQUENCY == 0:
