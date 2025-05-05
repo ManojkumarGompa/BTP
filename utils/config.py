@@ -10,13 +10,13 @@ SEED = 42
 ALGORITHM = "sfac"  # Options: "sfac", "pg" (policy gradient)
 
 # Training parameters
-NUM_EPISODES = 1000
+NUM_EPISODES = 2000
 MAX_STEPS_PER_EPISODE = 10000
 GAMMA = 0.99
 
 # Learning rates
-LR_ACTOR = 0.00025
-LR_CRITIC = 0.00025
+LR_ACTOR = 0.0001
+LR_CRITIC = 0.0001
 
 # Network architecture
 HIDDEN1_DIM = 512

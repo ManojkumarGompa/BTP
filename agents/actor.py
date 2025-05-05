@@ -89,7 +89,7 @@ class Actor(nn.Module):
         """
         Sample an action from the policy distribution with epsilon-greedy exploration
         """
-        epsilon = 0.2 * (1.0 - (self.training_steps / 1e3))  # Decay over time
+        epsilon = 0.09 * (1.0 - (self.training_steps / 1e6))  # Decay over time
         if random.random() < epsilon:
             return env.action_space.sample() 
         
