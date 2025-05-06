@@ -91,9 +91,9 @@ class Actor(nn.Module):
         """
         Sample an action from the policy distribution with epsilon-greedy exploration
         """
-        epsilon = 0.09 * (1.0 - (self.training_steps / 1e6))  # Decay over time
-        if random.random() < epsilon:
-            return env.action_space.sample() 
+        # epsilon = 0.09 * (1.0 - (self.training_steps / 1e6))  # Decay over time
+        # if random.random() < epsilon:
+        #     return env.action_space.sample() 
         
         # Check for NaN values in action probabilities
         if torch.isnan(action_probs).any():
