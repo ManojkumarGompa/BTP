@@ -8,7 +8,8 @@
 7. Learn about Assault Game
 8. pip install opencv-python
 include this in readme
-
+9.![alt text](image-1.png)
+thinking of rewards as scalar,we are not detaching it(since its not calculated from critic)...
 
 
 Changes made to original code till now:
