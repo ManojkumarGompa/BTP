@@ -15,6 +15,8 @@ from utils.preprocessing import AtariPreprocessor
 env = gym.make("ALE/Assault-v5", render_mode='rgb_array')
 gym.register_envs(ale_py)
 from memory_profiler import profile
+# env_temp = gym.make('ALE/Assault-v5', render_mode='rgb_array')
+
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_size, hidden1_dim=512, hidden2_dim=256):
@@ -307,7 +309,6 @@ class Actor(nn.Module):
         Run rollouts in the Assault-v5 environment and compute log-probabilities and discounted rewards.
         Uses preprocessing for better feature extraction.
         """
-        env_temp = gym.make('ALE/Assault-v5', render_mode='rgb_array')
         preprocessor = AtariPreprocessor()  # Using our new preprocessor
         
         log_probs_list = []
@@ -317,7 +318,7 @@ class Actor(nn.Module):
         
         # Run fewer episodes (3 instead of 5) as recommended for efficiency
         for _ in range(3):
-            state, _ = env_temp.reset()
+            state, _ = env.reset()
             state = preprocessor.process_state(state, reset=True)  # Preprocess initial state
             
             rewards = []
@@ -331,7 +332,7 @@ class Actor(nn.Module):
                 action_probs = self(state_tensor)
                 action = self.sample_action(action_probs[0])  # Sample action
                 
-                next_state, reward, done, truncated, _ = env_temp.step(action)
+                next_state, reward, done, truncated, _ = env.step(action)
                 next_state = preprocessor.process_state(next_state)  # Preprocess
                 reward = preprocessor.clip_reward(reward)  # Clip rewards as recommended
                 
@@ -358,8 +359,8 @@ class Actor(nn.Module):
                 
             # Store the cumulative (discounted) reward of the episode
             cumulative_rewards_list.append(discounted_rewards[0])
-        print("closing the env")   
-        env_temp.close()
+        # print("closing the env")   
+        # env_temp.close()
         
         # Convert to tensors
         states_tensor = torch.FloatTensor(np.stack(states_list)).to(device)
